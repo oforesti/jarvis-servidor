@@ -1,0 +1,30 @@
+# Dependências do servidor de licenças.
+#
+# Este arquivo tem nome em inglês porque é o nome que o Vercel procura ao
+# publicar uma função Python. O `requisitos.txt` ao lado aponta para cá.
+#
+# Separadas do requirements.txt do Jarvis de propósito: quem hospeda o
+# servidor não precisa de VLC, Playwright nem MediaPipe, e quem instala o
+# Jarvis não precisa de nada daqui.
+
+fastapi>=0.115
+pydantic>=2.7
+
+# senha: argon2id, o padrão atual para hash de senha
+argon2-cffi>=23.1
+
+# access token (JWT HS256)
+pyjwt>=2.8
+
+# assinatura Ed25519 do bloco de folga offline
+cryptography>=42.0
+
+# Postgres em produção. Na sua máquina, sem variável de conexão, o banco é um
+# arquivo SQLite e este pacote nem é importado.
+psycopg[binary]>=3.1
+
+# ---- só para rodar aqui e testar -----------------------------------------
+# No Vercel o servidor web é dele; o uvicorn só serve para a sua máquina.
+uvicorn[standard]>=0.30
+pytest>=8.0
+httpx>=0.27
