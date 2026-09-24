@@ -32,8 +32,9 @@ class DadosPedido(BaseModel):
     email: str = Field(max_length=200)
     nome: str = Field(default="", max_length=80)
     telefone: str = Field(default="", max_length=40)
-    plano: str = Field(default="base", max_length=30)
-    aparelhos: int = Field(default=0, ge=0, le=20)
+    plano: str = Field(default="singular", max_length=30)
+    # nos planos, o TOTAL de equipamentos a liberar (não mais os adicionais)
+    aparelhos: int = Field(default=1, ge=0, le=100)
     observacao: str = Field(default="", max_length=500)
 
 

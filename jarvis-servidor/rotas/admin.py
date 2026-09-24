@@ -21,14 +21,11 @@ import jwt
 from fastapi import APIRouter, Cookie, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from .. import acessos, assinaturas, banco, contas, pedidos
+from .. import acessos, assinaturas, banco, contas, pedidos, planos
 from ..config import config
 
 rotas = APIRouter(prefix="/admin", tags=["admin"])
 COOKIE = "jarvis_admin"
-
-MENSALIDADE = 39.99
-POR_APARELHO = 10.00
 
 
 # ------------------------------------------------------------------ sessão
@@ -159,6 +156,17 @@ th{color:var(--tenue);font-weight:500;font-size:11px;text-transform:uppercase;le
 .explica{border:1px dashed var(--borda);border-radius:11px;padding:14px 16px;margin-bottom:16px;
  color:var(--fraco);font-size:13.5px;line-height:1.6;}
 .explica b{color:var(--texto);}
+.tempo{font-weight:600;color:var(--texto);}
+.tempo.pouco{color:var(--alerta);} .tempo.acabou{color:var(--perigo);}
+.plano-tag.teste{border-color:rgba(255,178,63,.45);color:var(--alerta);}
+.plano-tag{font-size:11px;letter-spacing:1.3px;text-transform:uppercase;padding:3px 10px;
+ border-radius:20px;font-weight:600;border:1px solid var(--borda);color:var(--acento);flex:0 0 auto;}
+.ficha{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px;}
+.ficha div{border:1px solid var(--borda);border-radius:10px;padding:10px 12px;}
+.ficha small{display:block;font-size:11px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tenue);}
+.ficha b{font-size:16px;font-weight:600;}
+.ajuste{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;}
+.ajuste select,.ajuste input{width:auto;min-width:120px;padding:8px 10px;font-size:13.5px;}
 .entrada{max-width:380px;margin:12vh auto;}
 .entrada input{margin-bottom:10px;}
 .entrada button{width:100%;}
@@ -179,12 +187,14 @@ function aviso(texto, bom) {
 
 /* A acao acontece na linha e a linha se atualiza sozinha: sem recarregar a
    pagina, que e o que fazia o painel parecer travado no celular. */
-function acao(id, qual, botao) {
+function acao(id, qual, botao, extra) {
   if (botao) botao.disabled = true;
+  var corpo = { usuario: id, acao: qual };
+  if (extra) Object.keys(extra).forEach(function (k) { corpo[k] = extra[k]; });
   fetch('/admin/acao', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ usuario: id, acao: qual })
+    body: JSON.stringify(corpo)
   }).then(function (r) { return r.json(); }).then(function (d) {
     if (botao) botao.disabled = false;
     if (!d.ok) { aviso(d.erro || 'nao consegui', false); return; }
@@ -192,6 +202,7 @@ function acao(id, qual, botao) {
     var linha = document.getElementById('linha-' + id);
     if (linha && d.html) linha.outerHTML = d.html;
     if (d.numeros) atualizarNumeros(d.numeros);
+    if (d.recarregar) setTimeout(function () { location.reload(); }, 700);
   }).catch(function (e) {
     if (botao) botao.disabled = false;
     aviso('falhou: ' + e.message, false);
@@ -264,6 +275,15 @@ function ipAcao(ip, qual, botao) {
   }).catch(function (e) { botao.disabled = false; aviso('falhou: ' + e.message, false); });
 }
 
+function trocarPlano(id, botao) {
+  acao(id, 'plano', botao, { plano: document.getElementById('plano-' + id).value });
+}
+
+function definirEquipamentos(id, botao) {
+  acao(id, 'equipamentos', botao,
+       { quantidade: Number(document.getElementById('equip-' + id).value || 0) });
+}
+
 function filtrar(termo) {
   termo = termo.toLowerCase();
   document.querySelectorAll('[data-email]').forEach(function (l) {
@@ -306,14 +326,19 @@ def _pagina(titulo: str, corpo: str, quem: str = "", aba: str = "") -> HTMLRespo
 # ------------------------------------------------------------------ dados
 def _numeros() -> dict:
     linhas = banco.consultar(
-        "SELECT u.id, u.bloqueado, a.aparelhos_pagos FROM usuarios u "
+        "SELECT u.id, u.bloqueado, a.aparelhos_pagos, a.plano FROM usuarios u "
         "LEFT JOIN assinaturas a ON a.usuario_id = u.id")
-    ativas = vencidas = bloqueadas = extras = 0
+    ativas = vencidas = bloqueadas = liberados = em_teste = 0
+    mensal = 0.0
     for l in linhas:
         estado = contas.estado_da_assinatura(l["id"])
-        if estado["situacao"] == "ativa":
+        if estado["situacao"] == "ativa" and l["plano"] == planos.TESTE:
+            em_teste += 1
+            liberados += estado["limite"]
+        elif estado["situacao"] == "ativa":
             ativas += 1
-            extras += l["aparelhos_pagos"] or 0
+            mensal += planos.preco(l["plano"] or planos.LEGADO, l["aparelhos_pagos"] or 0)
+            liberados += estado["limite"]
         elif estado["situacao"] == "bloqueada" or l["bloqueado"]:
             bloqueadas += 1
         else:
@@ -323,10 +348,40 @@ def _numeros() -> dict:
     novos = pedidos.quantos_novos()
     desde = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
     recusas = banco.um("SELECT COUNT(*) AS n FROM recusas WHERE quando > ?", (desde,))["n"]
-    mensal = ativas * MENSALIDADE + extras * POR_APARELHO
     return {"ativas": ativas, "vencidas": vencidas, "bloqueadas": bloqueadas,
-            "aparelhos": aparelhos, "recusas": recusas, "pedidos": novos,
-            "receita": f"R$ {mensal:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")}
+            "aparelhos": aparelhos, "liberados": liberados, "teste": em_teste,
+            "recusas": recusas,
+            "pedidos": novos, "receita": planos.moeda(mensal)}
+
+
+def _tempo_restante(estado: dict, bloqueado: bool = False) -> tuple[str, str]:
+    """Quanto falta para o plano acabar, em texto e com a cor certa.
+
+    Devolve (texto, classe): classe "pouco" a partir de 7 dias, "acabou" quando
+    venceu ou nunca foi ativada.
+    """
+    validade = banco.para_data(estado["validade"])
+    if bloqueado or estado["situacao"] == "bloqueada":
+        return "bloqueada", "acabou"
+    if validade is None:
+        return "nunca ativada", "acabou"
+    teste = estado.get("plano") == planos.TESTE
+    falta = validade - datetime.now(timezone.utc)
+    data = validade.strftime("%d/%m/%Y")
+    if falta.total_seconds() <= 0:
+        return (f"teste acabou em {data}" if teste else f"acabou em {data}"), "acabou"
+    # arredonda para cima: recém-liberado por 30 dias mostra 30, não 29
+    dias = -(-int(falta.total_seconds()) // 86400) if falta.days >= 1 else 0
+    if dias >= 1:
+        texto = f"faltam {dias} dia{'s' if dias != 1 else ''} (até {data})"
+        if teste:
+            texto = "teste: " + texto
+    else:
+        horas = max(1, int(falta.total_seconds() // 3600))
+        texto = f"faltam {horas} hora{'s' if horas != 1 else ''} (até hoje, {validade.strftime('%H:%M')} UTC)"
+        if teste:
+            texto = "teste: " + texto
+    return texto, ("pouco" if dias < 7 else "")
 
 
 def _linha(usuario_id: int) -> str:
@@ -338,18 +393,10 @@ def _linha(usuario_id: int) -> str:
     if u is None:
         return ""
     estado = contas.estado_da_assinatura(usuario_id)
-    validade = banco.para_data(estado["validade"])
     aparelhos = banco.um("SELECT COUNT(*) AS n FROM aparelhos WHERE usuario_id = ?",
                          (usuario_id,))["n"]
 
-    if estado["situacao"] == "ativa" and validade:
-        dias = (validade - datetime.now(timezone.utc)).days
-        quando = f"vence em {dias} dia{'s' if dias != 1 else ''}" if dias <= 7 else \
-                 f"até {validade.strftime('%d/%m/%Y')}"
-    elif validade:
-        quando = f"venceu em {validade.strftime('%d/%m/%Y')}"
-    else:
-        quando = "nunca ativada"
+    quando, classe = _tempo_restante(estado, bool(u["bloqueado"]))
 
     rotulo = "bloqueada" if u["bloqueado"] else estado["situacao"]
     principal = (f'<button onclick="acao({usuario_id},\'ativar30\',this)">+ 30 dias</button>'
@@ -359,10 +406,14 @@ def _linha(usuario_id: int) -> str:
     return (
         f'<div class="linha" id="linha-{usuario_id}" data-email="{escape(u["email"].lower())}">'
         f'  <span class="quem"><b>{escape(u["email"])}</b>'
-        f'    <span>{quando} · {aparelhos} de {estado["limite"]} aparelhos</span></span>'
+        f'    <span><span class="tempo {classe}">{quando}</span> · '
+        f'<strong style="color:var(--texto)">{estado["limite"]}</strong> equipamento{"s" if estado["limite"] != 1 else ""} liberado{"s" if estado["limite"] != 1 else ""}'
+        f' ({aparelhos} em uso)</span></span>'
+        f'  <span class="plano-tag{" teste" if estado["plano"] == planos.TESTE else ""}">'
+        f'{escape(planos.nome(estado["plano"]))}</span>'
         f'  <span class="pilula {rotulo}">{rotulo}</span>'
         f'  <span class="acoes">{principal}'
-        f'    <button class="fantasma" onclick="acao({usuario_id},\'mais_aparelho\',this)">+ aparelho</button>'
+        f'    <button class="fantasma" onclick="acao({usuario_id},\'mais_aparelho\',this)">+ equipamento</button>'
         f'    <a href="/admin/usuario/{usuario_id}"><button class="fantasma">abrir</button></a>'
         f'  </span></div>')
 
@@ -390,8 +441,10 @@ def inicio(jarvis_admin: str | None = Cookie(default=None)):
       <div class="numeros">
         <div class="numero bom"><b id="n-ativas">{n['ativas']}</b><span>pagando</span></div>
         <div class="numero aviso"><b id="n-vencidas">{n['vencidas']}</b><span>vencidas</span></div>
+        <div class="numero"><b id="n-teste">{n['teste']}</b><span>em teste grátis</span></div>
         <div class="numero ruim"><b id="n-bloqueadas">{n['bloqueadas']}</b><span>bloqueadas</span></div>
-        <div class="numero"><b id="n-aparelhos">{n['aparelhos']}</b><span>aparelhos</span></div>
+        <div class="numero"><b id="n-liberados">{n['liberados']}</b><span>equipamentos liberados</span></div>
+        <div class="numero"><b id="n-aparelhos">{n['aparelhos']}</b><span>equipamentos em uso</span></div>
         <div class="numero{' aviso' if n['pedidos'] else ''}"><b id="n-pedidos">{n['pedidos']}</b>
           <span>{'pedidos novos' if n['pedidos'] != 1 else 'pedido novo'}</span></div>
         <div class="numero"><b id="n-receita" style="font-size:20px">{n['receita']}</b><span>por mês</span></div>
@@ -462,9 +515,10 @@ async def acao(request: Request, jarvis_admin: str | None = Cookie(default=None)
         "vencer": "assinatura vencida",
         "bloquear": "conta bloqueada",
         "desbloquear": "conta desbloqueada",
-        "mais_aparelho": "mais um aparelho liberado",
-        "menos_aparelho": "um aparelho a menos",
+        "mais_aparelho": "mais um equipamento liberado",
+        "menos_aparelho": "um equipamento a menos",
     }
+    recarregar = False
     if qual == "ativar30":
         assinaturas.ativar(usuario_id, 30)
     elif qual == "ativar365":
@@ -479,16 +533,37 @@ async def acao(request: Request, jarvis_admin: str | None = Cookie(default=None)
         assinaturas.definir_aparelhos_pagos(usuario_id, estado["aparelhos_pagos"] + 1)
     elif qual == "menos_aparelho":
         if estado["aparelhos_pagos"] <= 0:
-            return JSONResponse({"ok": False, "erro": "já está no plano base"}, 400)
+            return JSONResponse({"ok": False, "erro": "já está no mínimo de equipamentos"}, 400)
         assinaturas.definir_aparelhos_pagos(usuario_id, estado["aparelhos_pagos"] - 1)
+    elif qual == "plano":
+        novo = str(dados.get("plano") or "")
+        if not planos.existe(novo):
+            return JSONResponse({"ok": False, "erro": "plano desconhecido"}, 400)
+        assinaturas.definir_plano(usuario_id, novo)
+        mensagens[qual] = f"plano trocado para {planos.nome(novo)}"
+        recarregar = True
+    elif qual == "equipamentos":
+        try:
+            quantidade = int(dados.get("quantidade") or 0)
+        except (TypeError, ValueError):
+            quantidade = 0
+        if quantidade < config.aparelhos_inclusos:
+            return JSONResponse({"ok": False, "erro":
+                                 f"o mínimo é {config.aparelhos_inclusos}"}, 400)
+        assinaturas.definir_aparelhos_pagos(usuario_id, quantidade - config.aparelhos_inclusos)
+        mensagens[qual] = f"{quantidade} equipamento{'s' if quantidade != 1 else ''} liberado{'s' if quantidade != 1 else ''}"
+        recarregar = True
     elif qual == "remover_aparelho":
         contas.remover_aparelho(usuario_id, int(dados.get("aparelho") or 0))
         mensagens[qual] = "aparelho desconectado"
     else:
         return JSONResponse({"ok": False, "erro": f"ação desconhecida: {qual}"}, 400)
 
+    if qual in ("ativar30", "ativar365") and estado["plano"] == planos.TESTE:
+        mensagens[qual] += " — ainda no Teste grátis: troque o plano na conta"
     return JSONResponse({"ok": True, "msg": mensagens.get(qual, "feito"),
-                         "html": _linha(usuario_id), "numeros": _numeros()})
+                         "html": _linha(usuario_id), "numeros": _numeros(),
+                         "recarregar": recarregar})
 
 
 @rotas.get("/usuario/{usuario_id}", response_class=HTMLResponse)
@@ -513,32 +588,59 @@ def usuario(usuario_id: int, jarvis_admin: str | None = Cookie(default=None)):
                 f'<td>{escape(a["plataforma"] or "—")}</td><td>{quando}</td>'
                 f'<td>{botao}</td></tr>')
 
+    tempo, classe = _tempo_restante(estado, bool(alvo["bloqueado"]))
+    plano_atual = estado["plano"]
+    opcoes = "".join(
+        f'<option value="{k}"{" selected" if k == plano_atual else ""}>'
+        f'{escape(v["nome"])} — {planos.moeda(v["preco"])}</option>'
+        for k, v in planos.PLANOS.items())
+    if not planos.existe(plano_atual):
+        opcoes = f'<option value="" selected>{escape(planos.nome(plano_atual))}</option>' + opcoes
+    mensal = planos.preco(plano_atual, estado["aparelhos_pagos"])
+
     corpo = f"""
       <h1>{escape(alvo['email'])}</h1>
       <div class="painel">
         {_linha(usuario_id)}
         <p style="color:var(--tenue);font-size:12.5px;margin:10px 0 0">
-          conta criada em {criada.strftime('%d/%m/%Y') if criada else '—'} ·
-          {estado['aparelhos_pagos']} aparelho(s) adicional(is) pago(s)
+          conta criada em {criada.strftime('%d/%m/%Y') if criada else '—'}
         </p>
+      </div>
+      <div class="painel">
+        <h2>Plano</h2>
+        <div class="ficha">
+          <div><small>plano</small><b>{escape(planos.nome(plano_atual))}</b></div>
+          <div><small>cobre</small><b>{escape(planos.pessoas_txt(plano_atual))}</b></div>
+          <div><small>mensalidade</small><b>{planos.moeda(mensal)}</b></div>
+          <div><small>equipamentos liberados</small><b>{estado['limite']}</b></div>
+          <div><small>equipamentos em uso</small><b>{len(aparelhos)}</b></div>
+          <div><small>tempo restante</small><b class="tempo {classe}">{tempo}</b></div>
+        </div>
+        <div class="ajuste">
+          <select id="plano-{usuario_id}">{opcoes}</select>
+          <button class="fantasma" onclick="trocarPlano({usuario_id},this)">trocar plano</button>
+          <input id="equip-{usuario_id}" type="number" min="{config.aparelhos_inclusos}" max="500"
+                 value="{estado['limite']}">
+          <button class="fantasma" onclick="definirEquipamentos({usuario_id},this)">definir equipamentos</button>
+        </div>
       </div>
       <div class="painel">
         <h2>Assinatura</h2>
         <div class="acoes">
           <button onclick="acao({usuario_id},'ativar30',this)">+ 30 dias</button>
           <button onclick="acao({usuario_id},'ativar365',this)">+ 1 ano</button>
-          <button class="fantasma" onclick="acao({usuario_id},'mais_aparelho',this)">+ aparelho pago</button>
-          <button class="fantasma" onclick="acao({usuario_id},'menos_aparelho',this)">− aparelho pago</button>
+          <button class="fantasma" onclick="acao({usuario_id},'mais_aparelho',this)">+ equipamento</button>
+          <button class="fantasma" onclick="acao({usuario_id},'menos_aparelho',this)">− equipamento</button>
           <button class="perigo" onclick="acao({usuario_id},'vencer',this)">vencer agora</button>
           <button class="perigo" onclick="acao({usuario_id},'{'desbloquear' if alvo['bloqueado'] else 'bloquear'}',this)">
             {'desbloquear conta' if alvo['bloqueado'] else 'bloquear conta'}</button>
         </div>
       </div>
       <div class="painel">
-        <h2>Aparelhos ligados</h2>
+        <h2>Equipamentos ligados ({len(aparelhos)} de {estado['limite']})</h2>
         <table><tr><th>apelido</th><th>plataforma</th><th>último acesso</th><th></th></tr>
         {''.join(linha_aparelho(a) for a in aparelhos)
-         or '<tr><td colspan="4" class="vazio">nenhum aparelho ligado</td></tr>'}
+         or '<tr><td colspan="4" class="vazio">nenhum equipamento ligado</td></tr>'}
         </table>
       </div>"""
     return _pagina("Conta", corpo, admin["email"], "contas")
@@ -552,17 +654,27 @@ def _cartao_pedido(pedido_id: int) -> str:
     quando = escape(str(p["quando"])[:16].replace("T", " "))
     tem_conta = banco.um("SELECT id FROM usuarios WHERE email = ?", (p["email"],)) is not None
 
-    plano = "Assinatura" if p["plano"] == "base" else escape(p["plano"])
-    extras = f" + {p['aparelhos']} aparelho(s)" if p["aparelhos"] else ""
-    valor = MENSALIDADE + p["aparelhos"] * POR_APARELHO
-    valor_txt = f"R$ {valor:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+    equipamentos = planos.equipamentos_do_pedido(p["plano"], p["aparelhos"])
+    plano = (f'<b style="font-size:13.5px;color:var(--acento)">{escape(planos.nome(p["plano"]))}</b>'
+             f' ({escape(planos.pessoas_txt(p["plano"]))})')
+    extras = (f' · <b style="font-size:13.5px;color:var(--texto)">{equipamentos} equipamento'
+              f'{"s" if equipamentos != 1 else ""}</b>')
+    valor_txt = planos.moeda(planos.preco(p["plano"], p["aparelhos"]))
+
+    teste = p["plano"] == planos.TESTE
+    if teste:
+        plano = (f'<b style="font-size:13.5px;color:var(--alerta)">TESTE GRÁTIS</b>'
+                 f' ({planos.DIAS_TESTE} dias)')
+        valor_txt = "sem cobrança"
+    botao_liberar = (f"Liberar {planos.DIAS_TESTE} dias grátis" if teste
+                     else "Liberar 30 dias")
 
     if p["situacao"] == "novo":
         aviso_conta = ("" if tem_conta else
                        '<div class="obs">Ainda não criou a conta no Jarvis — '
                        'liberar só funciona depois que ela se cadastrar.</div>')
         acoes = (f"<button onclick=\"pedido({pedido_id},'atender',this)\">"
-                 f"Liberar 30 dias</button>"
+                 f"{botao_liberar}</button>"
                  f"<button class='fantasma' onclick=\"pedido({pedido_id},'recusar',this)\">"
                  f"Arquivar</button>")
     else:
@@ -582,7 +694,7 @@ def _cartao_pedido(pedido_id: int) -> str:
         f'    <span class="pilula {selo}">{rotulo}</span></div>'
         f'  <div class="detalhe">{escape(p["email"])}'
         f'{" · " + escape(p["telefone"]) if p["telefone"] else ""}'
-        f' · {plano}{extras} · {valor_txt}/mês · {quando}</div>'
+        f' · {plano}{extras} · {valor_txt}{"" if teste else "/mês"} · {quando}</div>'
         f'{observacao}'
         f'{aviso_conta}'
         f'  <div class="acoes">{acoes}</div></div>')
@@ -602,7 +714,9 @@ def lista_pedidos(jarvis_admin: str | None = Cookie(default=None)):
              '<div class="painel">',
              '<p style="color:var(--tenue);font-size:13px;margin:0 0 14px">'
              'Vieram do site. Confirme o pagamento e clique em <b>Liberar 30 dias</b> — '
-             'isso ativa a conta e fecha o pedido de uma vez.</p>']
+             'isso ativa a conta com o plano e os equipamentos pedidos e fecha o pedido '
+             'de uma vez. Pedido de <b>teste grátis</b> libera 7 dias; quando acabam, o '
+             'JARVIS para de abrir até você ativar um plano pago.</p>']
     corpo += [_cartao_pedido(p["id"]) for p in novos] or [
         '<div class="vazio">nenhum pedido novo</div>']
     corpo.append("</div>")
@@ -625,7 +739,8 @@ async def acao_pedido(request: Request, jarvis_admin: str | None = Cookie(defaul
     try:
         if qual == "atender":
             resultado = pedidos.atender(pedido_id)
-            msg = f"{resultado['email']} liberada por 30 dias"
+            msg = (f"{resultado['email']} liberada por {resultado['dias']} dias — "
+                   f"{planos.nome(resultado['plano'])}, {resultado['equipamentos']} equipamento(s)")
         elif qual == "recusar":
             pedidos.marcar(pedido_id, "recusado")
             msg = "pedido arquivado"

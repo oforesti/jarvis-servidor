@@ -10,15 +10,15 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from . import banco
+from . import banco, planos
 
 
 def _assinatura(usuario_id: int):
     linha = banco.um("SELECT * FROM assinaturas WHERE usuario_id = ?", (usuario_id,))
     if linha is None:
         banco.executar(
-            "INSERT INTO assinaturas (usuario_id, atualizado_em) VALUES (?, ?)",
-            (usuario_id, banco.agora()))
+            "INSERT INTO assinaturas (usuario_id, plano, atualizado_em) VALUES (?, ?, ?)",
+            (usuario_id, planos.PADRAO, banco.agora()))
         linha = banco.um("SELECT * FROM assinaturas WHERE usuario_id = ?", (usuario_id,))
     return linha
 
@@ -106,6 +106,23 @@ def definir_aparelhos_pagos(usuario_id: int, quantidade: int) -> dict:
     banco.executar(
         "UPDATE assinaturas SET aparelhos_pagos = ?, atualizado_em = ? WHERE usuario_id = ?",
         (max(0, int(quantidade)), banco.agora(), usuario_id))
+    return situacao(usuario_id)
+
+
+def definir_plano(usuario_id: int, plano: str, equipamentos: int | None = None) -> dict:
+    """Troca o plano e, se vier, o total de equipamentos liberados.
+
+    O total é guardado como adicionais sobre o que já vem incluso, que é como
+    o limite sempre foi calculado — assim nada que lê `limite` precisa mudar.
+    """
+    from .config import config
+
+    _assinatura(usuario_id)
+    banco.executar(
+        "UPDATE assinaturas SET plano = ?, atualizado_em = ? WHERE usuario_id = ?",
+        (plano, banco.agora(), usuario_id))
+    if equipamentos is not None:
+        definir_aparelhos_pagos(usuario_id, int(equipamentos) - config.aparelhos_inclusos)
     return situacao(usuario_id)
 
 

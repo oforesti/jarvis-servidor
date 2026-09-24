@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from . import banco
+from . import banco, planos
 from .contas import ErroConta, normalizar_email
 
 LIMITE_POR_HORA = 5
@@ -34,8 +34,49 @@ def _recentes(email: str, ip: str) -> int:
     return linha["n"] if linha else 0
 
 
-def criar(email: str, nome: str = "", telefone: str = "", plano: str = "base",
-          aparelhos: int = 0, observacao: str = "", ip: str = "") -> dict:
+def _normalizar_plano(plano: str, aparelhos: int) -> tuple[str, int]:
+    """Plano conhecido e total de equipamentos dentro do que ele permite.
+
+    Uma página antiga do site, ainda em cache, manda `base` com o número de
+    adicionais; vira Singular com o total equivalente, em vez de um pedido
+    que o painel não saberia cobrar.
+    """
+    plano = (plano or "").strip().lower()
+    if plano == planos.LEGADO or not plano:
+        return planos.PADRAO, min(planos.max_equipamentos(planos.PADRAO),
+                                  1 + max(0, int(aparelhos or 0)))
+    if not (planos.existe(plano) or plano == planos.TESTE):
+        raise ErroConta("esse plano não existe", 400, "plano_invalido")
+    maximo = planos.max_equipamentos(plano)
+    total = int(aparelhos or 0)
+    if total < 1 or total > maximo:
+        raise ErroConta(f"o plano {planos.nome(plano)} libera de 1 a {maximo} equipamentos",
+                        400, "equipamentos_invalidos")
+    return plano, total
+
+
+def _conferir_teste(email: str, usuario) -> None:
+    """Um teste grátis por pessoa, e só para quem nunca teve a conta liberada.
+
+    Sem isso, bastaria pedir outro teste a cada semana. A recusa diz o
+    caminho, em vez de só dizer não.
+    """
+    ja_testou = banco.um(
+        "SELECT id FROM pedidos WHERE email = ? AND plano = ? AND situacao = 'atendido'",
+        (email, planos.TESTE))
+    ja_ativou = False
+    if usuario is not None:
+        linha = banco.um("SELECT validade FROM assinaturas WHERE usuario_id = ?",
+                         (usuario["id"],))
+        ja_ativou = bool(linha and linha["validade"])
+    if ja_testou or ja_ativou:
+        raise ErroConta(
+            "esta conta já usou o teste grátis. Para continuar usando o JARVIS, "
+            "escolha um dos planos.", 409, "teste_ja_usado")
+
+
+def criar(email: str, nome: str = "", telefone: str = "", plano: str = planos.PADRAO,
+          aparelhos: int = 1, observacao: str = "", ip: str = "") -> dict:
     email = normalizar_email(email)
     if "@" not in email or "." not in email.split("@")[-1]:
         raise ErroConta("esse e-mail não parece válido", 400, "email_invalido")
@@ -46,11 +87,21 @@ def criar(email: str, nome: str = "", telefone: str = "", plano: str = "base",
             "recebi vários pedidos seus agora há pouco. Já estou olhando — "
             "se for urgente, me chame no e-mail.", 429, "pedidos_demais")
 
+    plano, aparelhos = _normalizar_plano(plano, aparelhos)
     usuario = banco.um("SELECT id FROM usuarios WHERE email = ?", (email,))
+    if plano == planos.TESTE:
+        _conferir_teste(email, usuario)
     aberto = banco.um(
-        "SELECT id FROM pedidos WHERE email = ? AND situacao = 'novo'", (email,))
+        "SELECT id, plano, aparelhos FROM pedidos WHERE email = ? AND situacao = 'novo'",
+        (email,))
 
-    aparelhos = max(0, min(20, int(aparelhos or 0)))
+    # O servidor roda no PC de casa, que nao fica ligado o dia todo: o aviso
+    # por e-mail e o que te alcanca quando voce nao esta na frente do painel.
+    from . import aviso_email
+
+    dados = {"email": email, "nome": nome, "telefone": telefone, "plano": plano,
+             "aparelhos": aparelhos, "observacao": observacao}
+
     if aberto:
         # clicou duas vezes, ou mudou de ideia sobre o plano: atualiza em vez
         # de criar outro. O painel não precisa ver a indecisão de ninguém.
@@ -60,6 +111,10 @@ def criar(email: str, nome: str = "", telefone: str = "", plano: str = "base",
             (plano, aparelhos, observacao[:500], nome[:80], telefone[:40],
              banco.agora(), usuario["id"] if usuario else None, aberto["id"]),
         )
+        # Mudou o plano ou os equipamentos? Então o e-mail que você recebeu
+        # antes está errado — manda o novo. Clique duplo não gera e-mail.
+        if (aberto["plano"], aberto["aparelhos"]) != (plano, aparelhos):
+            aviso_email.pedido_novo(dados, tem_conta=usuario is not None, alterado=True)
         return {"id": aberto["id"], "repetido": True}
 
     pedido_id = banco.executar(
@@ -68,15 +123,7 @@ def criar(email: str, nome: str = "", telefone: str = "", plano: str = "base",
         (usuario["id"] if usuario else None, email, nome[:80], telefone[:40],
          plano, aparelhos, observacao[:500], banco.agora(), ip[:60]),
     )
-
-    # O servidor roda no PC de casa, que nao fica ligado o dia todo: o aviso
-    # por e-mail e o que te alcanca quando voce nao esta na frente do painel.
-    from . import aviso_email
-
-    aviso_email.pedido_novo(
-        {"email": email, "nome": nome, "telefone": telefone, "plano": plano,
-         "aparelhos": aparelhos, "observacao": observacao},
-        tem_conta=usuario is not None)
+    aviso_email.pedido_novo(dados, tem_conta=usuario is not None)
 
     return {"id": pedido_id, "repetido": False}
 
@@ -114,7 +161,7 @@ def marcar(pedido_id: int, situacao: str) -> bool:
     return True
 
 
-def atender(pedido_id: int, dias: int = 30) -> dict:
+def atender(pedido_id: int, dias: int | None = None) -> dict:
     """Libera a conta do pedido e marca ele como resolvido, de uma vez só.
 
     É o caminho de todo dia: o Pix caiu, um clique. Se a pessoa ainda não
@@ -134,11 +181,13 @@ def atender(pedido_id: int, dias: int = 30) -> dict:
             "há o que liberar. Avise a pessoa para se cadastrar primeiro.",
             400, "sem_conta")
 
+    equipamentos = planos.equipamentos_do_pedido(pedido["plano"], pedido["aparelhos"])
+    if dias is None:
+        dias = planos.dias_de_liberacao(pedido["plano"])
     assinaturas.ativar(usuario["id"], dias)
-    if pedido["aparelhos"]:
-        assinaturas.definir_aparelhos_pagos(usuario["id"], pedido["aparelhos"])
+    assinaturas.definir_plano(usuario["id"], pedido["plano"], equipamentos)
     banco.executar("UPDATE pedidos SET usuario_id = ?, situacao = 'atendido', "
                    "atendido_em = ? WHERE id = ?",
                    (usuario["id"], banco.agora(), pedido_id))
     return {"usuario_id": usuario["id"], "email": pedido["email"],
-            "aparelhos": pedido["aparelhos"]}
+            "plano": pedido["plano"], "equipamentos": equipamentos, "dias": dias}

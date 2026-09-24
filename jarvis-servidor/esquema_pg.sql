@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS pedidos (
     nome         TEXT    NOT NULL DEFAULT '',
     telefone     TEXT    NOT NULL DEFAULT '',
     plano        TEXT    NOT NULL DEFAULT 'base',
-    aparelhos    INTEGER NOT NULL DEFAULT 0,   -- adicionais pedidos
+    aparelhos    INTEGER NOT NULL DEFAULT 0,   -- total de equipamentos (no plano 'base' antigo: adicionais)
     observacao   TEXT    NOT NULL DEFAULT '',
     situacao     TEXT    NOT NULL DEFAULT 'novo',  -- novo | atendido | recusado
     quando       TEXT    NOT NULL,

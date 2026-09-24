@@ -19,6 +19,10 @@ from .seguranca import (conferir_senha, criar_acesso, hash_refresh, hash_senha,
                         novo_refresh, senha_fraca)
 
 
+# conta nova nasce no plano de entrada; o pedido atendido troca pelo escolhido
+PLANO_INICIAL = "singular"
+
+
 class ErroConta(Exception):
     """Erro que vira resposta HTTP com mensagem legível em português."""
 
@@ -59,9 +63,9 @@ def criar_usuario(email: str, senha: str, nome: str = "", ip: str = "") -> dict:
                     + timedelta(days=config.dias_de_teste)).isoformat(timespec="seconds")
         situacao = "ativa"
     banco.executar(
-        "INSERT INTO assinaturas (usuario_id, validade, situacao, atualizado_em) "
-        "VALUES (?, ?, ?, ?)",
-        (usuario_id, validade, situacao, agora),
+        "INSERT INTO assinaturas (usuario_id, plano, validade, situacao, atualizado_em) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (usuario_id, PLANO_INICIAL, validade, situacao, agora),
     )
     return {"id": usuario_id, "email": email}
 
@@ -108,7 +112,7 @@ def estado_da_assinatura(usuario_id: int) -> dict:
     linha = banco.um("SELECT * FROM assinaturas WHERE usuario_id = ?", (usuario_id,))
     if linha is None:
         return {"situacao": "vencida", "validade": None, "aparelhos_pagos": 0,
-                "limite": config.aparelhos_inclusos, "plano": "base", "motivo":
+                "limite": config.aparelhos_inclusos, "plano": PLANO_INICIAL, "motivo":
                 "esta conta ainda não tem assinatura"}
 
     validade = banco.para_data(linha["validade"])
@@ -119,7 +123,12 @@ def estado_da_assinatura(usuario_id: int) -> dict:
     elif validade is None:
         situacao, motivo = "vencida", "assinatura ainda não foi ativada"
     elif validade < datetime.now(timezone.utc):
-        situacao, motivo = "vencida", "assinatura venceu em " + validade.strftime("%d/%m/%Y")
+        if linha["plano"] == "teste":
+            situacao, motivo = "vencida", ("seu teste grátis acabou em "
+                                           + validade.strftime("%d/%m/%Y")
+                                           + ". Ative um plano para continuar usando")
+        else:
+            situacao, motivo = "vencida", "assinatura venceu em " + validade.strftime("%d/%m/%Y")
     else:
         situacao = "ativa"
 
