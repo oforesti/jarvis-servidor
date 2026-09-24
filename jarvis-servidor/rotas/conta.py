@@ -109,6 +109,7 @@ def listar_aparelhos(token: dict = Depends(exigir_token)) -> dict:
     estado = contas.estado_da_assinatura(usuario_id)
     return {"ok": True, "aparelhos": contas.aparelhos_do_usuario(usuario_id),
             "este": token.get("apa"), "limite": estado["limite"],
+            "computadores": estado["computadores"], "celulares": estado["celulares"],
             "ilimitado": estado["ilimitado"]}
 
 

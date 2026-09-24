@@ -53,13 +53,13 @@ def validar(usuario_id: int, aparelho_id: int, ip: str = "") -> dict:
 
     # o limite do plano, à risca: equipamento além dele não abre o Jarvis,
     # nem os que já estavam ligados quando o limite desceu
-    if aparelho_id in contas.fora_do_limite(usuario_id, estado["limite"]):
+    if aparelho_id in contas.fora_do_limite(usuario_id, estado["computadores"]):
         ligados = contas.aparelhos_do_usuario(usuario_id)
         return _negado(
             usuario_id, "limite_de_aparelhos",
-            f"seu plano libera {planos.equipamentos_txt(estado['limite'])} e a conta tem "
-            f"{len(ligados)} ligados; este ficou de fora. Remova um equipamento na tela "
-            "de conta para liberar este, ou mude para um plano maior.",
+            f"seu plano libera {planos.equipamentos_txt(estado['computadores'])}, e este "
+            "equipamento passou do limite. Remova outro na tela de conta para liberar "
+            "este, ou mude para um plano maior.",
             estado, email, ip, extra={"limite": estado["limite"], "aparelhos": ligados})
 
     validade = banco.para_data(estado["validade"])

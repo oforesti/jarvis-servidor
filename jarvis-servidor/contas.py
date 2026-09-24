@@ -22,6 +22,15 @@ from .seguranca import (conferir_senha, criar_acesso, hash_refresh, hash_senha,
 # conta nova nasce no plano de entrada; o pedido atendido troca pelo escolhido
 PLANO_INICIAL = planos.PADRAO
 
+# O que a plataforma do aparelho precisa conter para ocupar vaga de celular.
+# Todo o resto (windows, linux, macos...) ocupa vaga de computador.
+_CELULAR = ("android", "ios", "iphone", "ipad", "celular", "mobile", "movel", "móvel")
+
+
+def eh_celular(plataforma: str) -> bool:
+    texto = (plataforma or "").strip().lower()
+    return any(p in texto for p in _CELULAR)
+
 
 class ErroConta(Exception):
     """Erro que vira resposta HTTP com mensagem legível em português."""
@@ -111,9 +120,11 @@ def estado_da_assinatura(usuario_id: int) -> dict:
     """
     linha = banco.um("SELECT * FROM assinaturas WHERE usuario_id = ?", (usuario_id,))
     if linha is None:
+        vagas = max(1, config.aparelhos_inclusos)
         return {"situacao": "vencida", "validade": None, "aparelhos_pagos": 0,
-                "limite": config.aparelhos_inclusos, "ilimitado": False,
-                "plano": PLANO_INICIAL, "motivo": "esta conta ainda não tem assinatura"}
+                "computadores": vagas, "celulares": vagas, "limite": vagas * 2,
+                "ilimitado": False, "plano": PLANO_INICIAL,
+                "motivo": "esta conta ainda não tem assinatura"}
 
     validade = banco.para_data(linha["validade"])
     situacao = linha["situacao"]
@@ -132,16 +143,20 @@ def estado_da_assinatura(usuario_id: int) -> dict:
     else:
         situacao = "ativa"
 
-    # o liberado para a conta, mas nunca acima do teto do plano
-    limite = planos.limite_efetivo(linha["plano"],
-                                   config.aparelhos_inclusos + linha["aparelhos_pagos"])
+    # o liberado para a conta, mas nunca acima do teto do plano. Cada vaga é
+    # um computador e um celular; `limite` é o total, para quem só soma
+    vagas = planos.limite_efetivo(linha["plano"],
+                                  config.aparelhos_inclusos + linha["aparelhos_pagos"])
+    ilimitado = vagas >= planos.SEM_LIMITE
     return {
         "situacao": situacao,
         "validade": linha["validade"],
         "plano": linha["plano"],
         "aparelhos_pagos": linha["aparelhos_pagos"],
-        "limite": limite,
-        "ilimitado": limite >= planos.SEM_LIMITE,
+        "computadores": vagas,
+        "celulares": vagas,
+        "limite": planos.SEM_LIMITE if ilimitado else vagas * 2,
+        "ilimitado": ilimitado,
         "motivo": motivo,
     }
 
@@ -160,6 +175,9 @@ def registrar_aparelho(usuario_id: int, impressao: str, apelido: str,
                        plataforma: str, email: str = "", ip: str = "") -> int:
     """Devolve o id do aparelho, recusando aparelho novo além do limite do plano.
 
+    Computador e celular têm vagas separadas: o celular de quem tem um
+    computador liberado nunca tira a vaga de outro computador.
+
     Aparelho já conhecido entra sempre, mesmo fora do limite: é por ele que a
     pessoa abre a tela de conta e remove outro. Quem barra o uso de quem
     passou do limite é a licença, com `fora_do_limite`.
@@ -173,24 +191,31 @@ def registrar_aparelho(usuario_id: int, impressao: str, apelido: str,
         (usuario_id, impressao),
     )
     if existente:
+        # a plataforma só é preenchida uma vez: é ela que diz se o aparelho
+        # ocupa vaga de computador ou de celular, e trocá-la a cada login
+        # abriria vaga de graça
         banco.executar(
             "UPDATE aparelhos SET ultimo_acesso = ?, apelido = COALESCE(NULLIF(?, ''), apelido), "
-            "plataforma = COALESCE(NULLIF(?, ''), plataforma) WHERE id = ?",
+            "plataforma = CASE WHEN plataforma = '' THEN ? ELSE plataforma END WHERE id = ?",
             (agora, (apelido or "").strip()[:60], (plataforma or "").strip()[:30], existente["id"]),
         )
         return existente["id"]
 
     estado = estado_da_assinatura(usuario_id)
-    atuais = banco.um("SELECT COUNT(*) AS n FROM aparelhos WHERE usuario_id = ?",
-                      (usuario_id,))["n"]
-    if atuais >= estado["limite"]:
+    celular = eh_celular(plataforma)
+    vagas = estado["celulares"] if celular else estado["computadores"]
+    atuais = sum(1 for a in aparelhos_do_usuario(usuario_id)
+                 if eh_celular(a["plataforma"]) == celular)
+    if atuais >= vagas:
+        ja_tem = (planos.qtd(atuais, "celular", "celulares") if celular
+                  else planos.qtd(atuais, "computador", "computadores"))
         banco.anotar_recusa(
             "limite_de_aparelhos", email=email, impressao=impressao, ip=ip,
-            detalhe=f"{atuais} aparelhos, limite {estado['limite']}")
+            detalhe=f"{ja_tem}, limite {vagas}")
         raise ErroConta(
-            f"seu plano libera {planos.equipamentos_txt(estado['limite'])} e você já tem "
-            f"{atuais} ligado{'s' if atuais != 1 else ''}. Remova um equipamento na tela "
-            "de conta ou mude para um plano maior.",
+            f"seu plano libera {planos.equipamentos_txt(estado['computadores'])} e você já "
+            f"tem {ja_tem} ligado{'s' if atuais != 1 else ''}. Remova um na tela de conta "
+            "ou mude para um plano maior.",
             403, "limite_de_aparelhos",
             extra={"limite": estado["limite"], "aparelhos": aparelhos_do_usuario(usuario_id)},
         )
@@ -203,17 +228,23 @@ def registrar_aparelho(usuario_id: int, impressao: str, apelido: str,
     )
 
 
-def fora_do_limite(usuario_id: int, limite: int) -> set[int]:
+def fora_do_limite(usuario_id: int, vagas: int) -> set[int]:
     """Os aparelhos que passaram do limite do plano e não podem usar o Jarvis.
 
-    Valem os `limite` que entraram primeiro; sobra aparelho quando o limite
-    desce (plano menor, "− equipamento" no painel). A ordem de entrada não
-    muda sozinha, então ninguém revezando aparelhos fura o limite — e a
-    pessoa escolhe qual continua removendo os outros na tela de conta.
+    Valem os `vagas` computadores e os `vagas` celulares que entraram
+    primeiro; sobra aparelho quando o limite desce (plano menor,
+    "− equipamento" no painel). A ordem de entrada não muda sozinha, então
+    ninguém revezando aparelhos fura o limite — e a pessoa escolhe qual
+    continua removendo os outros na tela de conta.
     """
     linhas = banco.consultar(
-        "SELECT id FROM aparelhos WHERE usuario_id = ? ORDER BY id", (usuario_id,))
-    return {l["id"] for l in linhas[max(0, int(limite)):]}
+        "SELECT id, plataforma FROM aparelhos WHERE usuario_id = ? ORDER BY id",
+        (usuario_id,))
+    fora: set[int] = set()
+    for celular in (False, True):
+        do_tipo = [l["id"] for l in linhas if eh_celular(l["plataforma"]) == celular]
+        fora.update(do_tipo[max(0, int(vagas)):])
+    return fora
 
 
 def remover_aparelho(usuario_id: int, aparelho_id: int) -> bool:

@@ -52,7 +52,8 @@ def _normalizar_plano(plano: str, aparelhos: int) -> tuple[str, int]:
     maximo = planos.max_equipamentos(plano)
     total = int(aparelhos or 0)
     if total < 1 or total > maximo:
-        faixa = "1 equipamento" if maximo == 1 else f"de 1 a {maximo} equipamentos"
+        faixa = ("1 computador (com o celular)" if maximo == 1
+                 else f"de 1 a {maximo} computadores (cada um com o celular)")
         raise ErroConta(f"o plano {planos.nome(plano)} libera {faixa}",
                         400, "equipamentos_invalidos")
     return plano, total

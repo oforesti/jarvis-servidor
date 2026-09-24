@@ -4,10 +4,13 @@ O site, o e-mail de aviso e o painel leem daqui. Mudar um preço é mudar esta
 tabela (e o espelho dela no `index.html` do site, que é estático e não tem
 como perguntar ao servidor).
 
-Cada plano tem um teto de equipamentos, cobrado à risca: a pessoa escolhe no
-pedido quantos quer liberados (até o teto), e nenhuma conta passa dele — nem
-pelo painel, nem trocando de plano. Equipamento além do limite não abre o
-Jarvis. `None` no teto é o Supreme: sem limite.
+Cada plano é uma conta só (um e-mail, a mesma memória em todos os
+equipamentos) com um teto de vagas, cobrado à risca. Cada vaga é um
+computador com o app no celular: o Singular libera 1 computador e 1 celular,
+o Business até 5 de cada. A pessoa escolhe no pedido quantas vagas quer (até
+o teto), e nenhuma conta passa dele — nem pelo painel, nem trocando de plano.
+Equipamento além do limite não abre o Jarvis. `None` no teto é o Supreme:
+sem limite.
 """
 
 from __future__ import annotations
@@ -90,10 +93,16 @@ def limite_efetivo(plano: str, liberados: int) -> int:
     return liberados if teto is None else min(liberados, teto)
 
 
-def equipamentos_txt(quantidade: int | None) -> str:
-    if quantidade is None or quantidade >= SEM_LIMITE:
+def qtd(n: int, um: str, varios: str) -> str:
+    return f"{n} {um if n == 1 else varios}"
+
+
+def equipamentos_txt(vagas: int | None) -> str:
+    """O que um número de vagas libera: "5 computadores + 5 celulares"."""
+    if vagas is None or vagas >= SEM_LIMITE:
         return "sem limite de equipamentos"
-    return f"{quantidade} equipamento{'s' if quantidade != 1 else ''}"
+    return (f"{qtd(vagas, 'computador', 'computadores')} + "
+            f"{qtd(vagas, 'celular', 'celulares')}")
 
 
 def preco(plano: str, extras_legado: int = 0) -> float:
