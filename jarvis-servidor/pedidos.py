@@ -35,22 +35,25 @@ def _recentes(email: str, ip: str) -> int:
 
 
 def _normalizar_plano(plano: str, aparelhos: int) -> tuple[str, int]:
-    """Plano conhecido e total de equipamentos dentro do que ele permite.
+    """Plano conhecido e total de equipamentos dentro do teto dele.
 
     Uma página antiga do site, ainda em cache, manda `base` com o número de
-    adicionais; vira Singular com o total equivalente, em vez de um pedido
-    que o painel não saberia cobrar.
+    adicionais; vira Singular, que libera um equipamento só, em vez de um
+    pedido que o painel não saberia cobrar. No Supreme o número não importa:
+    ele é sem limite, e o pedido guarda 0.
     """
     plano = (plano or "").strip().lower()
     if plano == planos.LEGADO or not plano:
-        return planos.PADRAO, min(planos.max_equipamentos(planos.PADRAO),
-                                  1 + max(0, int(aparelhos or 0)))
+        return planos.PADRAO, 1
     if not (planos.existe(plano) or plano == planos.TESTE):
         raise ErroConta("esse plano não existe", 400, "plano_invalido")
+    if planos.ilimitado(plano):
+        return plano, 0
     maximo = planos.max_equipamentos(plano)
     total = int(aparelhos or 0)
     if total < 1 or total > maximo:
-        raise ErroConta(f"o plano {planos.nome(plano)} libera de 1 a {maximo} equipamentos",
+        faixa = "1 equipamento" if maximo == 1 else f"de 1 a {maximo} equipamentos"
+        raise ErroConta(f"o plano {planos.nome(plano)} libera {faixa}",
                         400, "equipamentos_invalidos")
     return plano, total
 

@@ -96,11 +96,12 @@ def desbloquear(usuario_id: int) -> dict:
 
 
 def definir_aparelhos_pagos(usuario_id: int, quantidade: int) -> dict:
-    """Aparelhos ADICIONAIS pagos, além do que o plano base já inclui.
+    """Equipamentos liberados além do que já vem incluso na conta.
 
-    Baixar este número nunca desconecta ninguém: quem já está ligado continua,
-    e o limite só volta a morder no próximo aparelho novo. Desconectar alguém
-    sozinho, por causa de uma mudança de plano, daria suporte no domingo.
+    O limite é cobrado à risca: baixar este número tira o acesso dos
+    equipamentos que passam do novo limite (os que entraram por último) na
+    próxima validação da licença. A pessoa escolhe qual continua removendo os
+    outros na tela de conta.
     """
     _assinatura(usuario_id)
     banco.executar(
@@ -112,17 +113,25 @@ def definir_aparelhos_pagos(usuario_id: int, quantidade: int) -> dict:
 def definir_plano(usuario_id: int, plano: str, equipamentos: int | None = None) -> dict:
     """Troca o plano e, se vier, o total de equipamentos liberados.
 
-    O total é guardado como adicionais sobre o que já vem incluso, que é como
-    o limite sempre foi calculado — assim nada que lê `limite` precisa mudar.
+    Nunca acima do teto do novo plano. Sem o total, mantém o que estava
+    liberado, cortado no teto: descer de Executive para Business deixa 5, não
+    10. O total é guardado como adicionais sobre o que já vem incluso, que é
+    como o limite sempre foi calculado.
     """
     from .config import config
 
-    _assinatura(usuario_id)
+    atual = _assinatura(usuario_id)
     banco.executar(
         "UPDATE assinaturas SET plano = ?, atualizado_em = ? WHERE usuario_id = ?",
         (plano, banco.agora(), usuario_id))
+    teto = planos.max_equipamentos(plano)
+    if equipamentos is None and teto is not None:
+        liberados = config.aparelhos_inclusos + atual["aparelhos_pagos"]
+        if liberados > teto:
+            equipamentos = teto
     if equipamentos is not None:
-        definir_aparelhos_pagos(usuario_id, int(equipamentos) - config.aparelhos_inclusos)
+        total = int(equipamentos) if teto is None else min(int(equipamentos), teto)
+        definir_aparelhos_pagos(usuario_id, total - config.aparelhos_inclusos)
     return situacao(usuario_id)
 
 

@@ -85,8 +85,7 @@ def pedido_de_teste(pedido: dict, tem_conta: bool, alterado: bool = False) -> No
         f"E-mail:        {pedido['email']}",
         f"WhatsApp:      {pedido.get('telefone') or '-'}",
         f"Pedido:        TESTE GRATIS de {planos.DIAS_TESTE} dias (nada a cobrar)",
-        f"Equipamentos:  {equipamentos} equipamento{'s' if equipamentos != 1 else ''} "
-        "para liberar",
+        f"Equipamentos:  {planos.equipamentos_txt(equipamentos)} para liberar",
         "",
     ]
     if pedido.get("observacao"):
@@ -99,7 +98,7 @@ def pedido_de_teste(pedido: dict, tem_conta: bool, alterado: bool = False) -> No
                f"Depois de {planos.DIAS_TESTE} dias o Jarvis para de abrir sozinho, "
                "ate um plano pago ser ativado."]
     avisar(f"Jarvis: {'teste alterado' if alterado else 'pedido de TESTE GRATIS'} de {quem} — "
-           f"{planos.DIAS_TESTE} dias, {equipamentos} equip.",
+           f"{planos.DIAS_TESTE} dias, {planos.equipamentos_txt(equipamentos)}",
            "\n".join(linhas))
 
 
@@ -117,8 +116,8 @@ def pedido_novo(pedido: dict, tem_conta: bool, alterado: bool = False) -> None:
         f"E-mail:        {pedido['email']}",
         f"WhatsApp:      {pedido.get('telefone') or '-'}",
         f"Plano:         {planos.nome(plano)} ({planos.pessoas_txt(plano)})",
-        f"Equipamentos:  {equipamentos} equipamento{'s' if equipamentos != 1 else ''} "
-        "para liberar",
+        f"Equipamentos:  {planos.equipamentos_txt(equipamentos)}"
+        + ("" if equipamentos is None else " para liberar"),
         f"Valor:         {planos.moeda(planos.preco(plano))} por mes",
         "",
     ]
@@ -128,9 +127,9 @@ def pedido_novo(pedido: dict, tem_conta: bool, alterado: bool = False) -> None:
         linhas += ["Atencao: essa pessoa ainda NAO criou a conta no Jarvis.",
                    "Sem conta nao da para liberar — avise ela para se cadastrar.", ""]
     linhas += ["Para liberar, abra o painel na aba Pedidos e clique em Liberar 30 dias.",
-               f"Isso ja ativa o plano {planos.nome(plano)} com {equipamentos} "
-               f"equipamento{'s' if equipamentos != 1 else ''}."]
+               f"Isso ja ativa o plano {planos.nome(plano)} com "
+               f"{planos.equipamentos_txt(equipamentos)}."]
     avisar(f"Jarvis: {'pedido alterado' if alterado else 'pedido'} de {quem} — "
-           f"{planos.nome(plano)}, {equipamentos} equip., "
+           f"{planos.nome(plano)}, {planos.equipamentos_txt(equipamentos)}, "
            f"{planos.moeda(planos.preco(plano))}/mes",
            "\n".join(linhas))

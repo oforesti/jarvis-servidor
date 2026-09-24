@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from . import banco, contas
+from . import banco, contas, planos
 from .config import config
 from .seguranca import assinar_licenca
 
@@ -51,6 +51,17 @@ def validar(usuario_id: int, aparelho_id: int, ip: str = "") -> dict:
         return _negado(usuario_id, estado["situacao"],
                        estado["motivo"] or "assinatura sem validade", estado, email, ip)
 
+    # o limite do plano, à risca: equipamento além dele não abre o Jarvis,
+    # nem os que já estavam ligados quando o limite desceu
+    if aparelho_id in contas.fora_do_limite(usuario_id, estado["limite"]):
+        ligados = contas.aparelhos_do_usuario(usuario_id)
+        return _negado(
+            usuario_id, "limite_de_aparelhos",
+            f"seu plano libera {planos.equipamentos_txt(estado['limite'])} e a conta tem "
+            f"{len(ligados)} ligados; este ficou de fora. Remova um equipamento na tela "
+            "de conta para liberar este, ou mude para um plano maior.",
+            estado, email, ip, extra={"limite": estado["limite"], "aparelhos": ligados})
+
     validade = banco.para_data(estado["validade"])
     agora = datetime.now(timezone.utc)
     vale_ate = _menor(validade, agora + timedelta(days=config.dias_folga))
@@ -81,7 +92,7 @@ def validar(usuario_id: int, aparelho_id: int, ip: str = "") -> dict:
 
 
 def _negado(usuario_id: int, motivo: str, texto: str, estado: dict,
-            email: str, ip: str) -> dict:
+            email: str, ip: str, extra: dict | None = None) -> dict:
     """Recusa registrada e explicada — sem bloco assinado, que é o que trava.
 
     Sem `bloco`, o cliente não tem o que guardar: no próximo boot offline ele
@@ -96,4 +107,5 @@ def _negado(usuario_id: int, motivo: str, texto: str, estado: dict,
         "assinatura": estado,
         "bloco": "",
         "url_assinatura": config.url_assinatura,
+        **(extra or {}),
     }

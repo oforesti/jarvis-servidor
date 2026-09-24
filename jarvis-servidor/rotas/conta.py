@@ -106,9 +106,10 @@ def ver(token: dict = Depends(exigir_token)) -> dict:
 @rotas.get("/aparelhos")
 def listar_aparelhos(token: dict = Depends(exigir_token)) -> dict:
     usuario_id = int(token["sub"])
+    estado = contas.estado_da_assinatura(usuario_id)
     return {"ok": True, "aparelhos": contas.aparelhos_do_usuario(usuario_id),
-            "este": token.get("apa"),
-            "limite": contas.estado_da_assinatura(usuario_id)["limite"]}
+            "este": token.get("apa"), "limite": estado["limite"],
+            "ilimitado": estado["ilimitado"]}
 
 
 @rotas.delete("/aparelhos/{aparelho_id}")

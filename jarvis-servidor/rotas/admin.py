@@ -275,13 +275,26 @@ function ipAcao(ip, qual, botao) {
   }).catch(function (e) { botao.disabled = false; aviso('falhou: ' + e.message, false); });
 }
 
-function trocarPlano(id, botao) {
-  acao(id, 'plano', botao, { plano: document.getElementById('plano-' + id).value });
+function salvarPlano(id, botao) {
+  acao(id, 'plano', botao, {
+    plano: document.getElementById('plano-' + id).value,
+    quantidade: Number(document.getElementById('equip-' + id).value || 0)
+  });
 }
 
-function definirEquipamentos(id, botao) {
-  acao(id, 'equipamentos', botao,
-       { quantidade: Number(document.getElementById('equip-' + id).value || 0) });
+/* o campo de equipamentos acompanha o teto do plano escolhido: nao deixa
+   pedir mais do que o plano vende, e no Supreme nao ha o que escolher */
+function ajustarTeto(id) {
+  var op = document.getElementById('plano-' + id).selectedOptions[0];
+  var equip = document.getElementById('equip-' + id);
+  var teto = op ? op.getAttribute('data-teto') : '';
+  if (!teto || teto === 'sem') {
+    equip.value = ''; equip.disabled = true;
+    equip.placeholder = teto === 'sem' ? 'sem limite' : '—';
+    return;
+  }
+  equip.disabled = false; equip.placeholder = '';
+  equip.max = teto; equip.value = teto;
 }
 
 function filtrar(termo) {
@@ -328,17 +341,20 @@ def _numeros() -> dict:
     linhas = banco.consultar(
         "SELECT u.id, u.bloqueado, a.aparelhos_pagos, a.plano FROM usuarios u "
         "LEFT JOIN assinaturas a ON a.usuario_id = u.id")
-    ativas = vencidas = bloqueadas = liberados = em_teste = 0
+    ativas = vencidas = bloqueadas = liberados = em_teste = sem_limite = 0
     mensal = 0.0
     for l in linhas:
         estado = contas.estado_da_assinatura(l["id"])
-        if estado["situacao"] == "ativa" and l["plano"] == planos.TESTE:
-            em_teste += 1
-            liberados += estado["limite"]
-        elif estado["situacao"] == "ativa":
-            ativas += 1
-            mensal += planos.preco(l["plano"] or planos.LEGADO, l["aparelhos_pagos"] or 0)
-            liberados += estado["limite"]
+        if estado["situacao"] == "ativa":
+            if l["plano"] == planos.TESTE:
+                em_teste += 1
+            else:
+                ativas += 1
+                mensal += planos.preco(l["plano"] or planos.LEGADO, l["aparelhos_pagos"] or 0)
+            if estado["ilimitado"]:
+                sem_limite += 1
+            else:
+                liberados += estado["limite"]
         elif estado["situacao"] == "bloqueada" or l["bloqueado"]:
             bloqueadas += 1
         else:
@@ -349,7 +365,9 @@ def _numeros() -> dict:
     desde = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
     recusas = banco.um("SELECT COUNT(*) AS n FROM recusas WHERE quando > ?", (desde,))["n"]
     return {"ativas": ativas, "vencidas": vencidas, "bloqueadas": bloqueadas,
-            "aparelhos": aparelhos, "liberados": liberados, "teste": em_teste,
+            "aparelhos": aparelhos, "teste": em_teste,
+            # conta Supreme não soma número: aparece como "+ ∞"
+            "liberados": f"{liberados} + ∞" if sem_limite else str(liberados),
             "recusas": recusas,
             "pedidos": novos, "receita": planos.moeda(mensal)}
 
@@ -384,6 +402,22 @@ def _tempo_restante(estado: dict, bloqueado: bool = False) -> tuple[str, str]:
     return texto, ("pouco" if dias < 7 else "")
 
 
+def _liberados_html(estado: dict) -> str:
+    if estado["ilimitado"]:
+        return '<strong style="color:var(--texto)">sem limite</strong> de equipamentos'
+    n = estado["limite"]
+    return (f'<strong style="color:var(--texto)">{n}</strong> equipamento{"s" if n != 1 else ""} '
+            f'liberado{"s" if n != 1 else ""}')
+
+
+def _pode_mais_um(estado: dict) -> bool:
+    """O "+ equipamento" só aparece enquanto o plano ainda deixa subir."""
+    if estado["ilimitado"]:
+        return False
+    teto = planos.max_equipamentos(estado["plano"])
+    return teto is None or estado["limite"] < teto
+
+
 def _linha(usuario_id: int) -> str:
     """Uma linha da lista, com a ação principal à mão.
 
@@ -397,6 +431,11 @@ def _linha(usuario_id: int) -> str:
                          (usuario_id,))["n"]
 
     quando, classe = _tempo_restante(estado, bool(u["bloqueado"]))
+    fora = len(contas.fora_do_limite(usuario_id, estado["limite"]))
+    alerta = (f' · <span class="tempo acabou">{fora} fora do limite, sem acesso</span>'
+              if fora else "")
+    mais = (f'    <button class="fantasma" onclick="acao({usuario_id},\'mais_aparelho\',this)">'
+            f'+ equipamento</button>' if _pode_mais_um(estado) else "")
 
     rotulo = "bloqueada" if u["bloqueado"] else estado["situacao"]
     principal = (f'<button onclick="acao({usuario_id},\'ativar30\',this)">+ 30 dias</button>'
@@ -407,13 +446,12 @@ def _linha(usuario_id: int) -> str:
         f'<div class="linha" id="linha-{usuario_id}" data-email="{escape(u["email"].lower())}">'
         f'  <span class="quem"><b>{escape(u["email"])}</b>'
         f'    <span><span class="tempo {classe}">{quando}</span> · '
-        f'<strong style="color:var(--texto)">{estado["limite"]}</strong> equipamento{"s" if estado["limite"] != 1 else ""} liberado{"s" if estado["limite"] != 1 else ""}'
-        f' ({aparelhos} em uso)</span></span>'
+        f'{_liberados_html(estado)} ({aparelhos} em uso){alerta}</span></span>'
         f'  <span class="plano-tag{" teste" if estado["plano"] == planos.TESTE else ""}">'
         f'{escape(planos.nome(estado["plano"]))}</span>'
         f'  <span class="pilula {rotulo}">{rotulo}</span>'
         f'  <span class="acoes">{principal}'
-        f'    <button class="fantasma" onclick="acao({usuario_id},\'mais_aparelho\',this)">+ equipamento</button>'
+        f'{mais}'
         f'    <a href="/admin/usuario/{usuario_id}"><button class="fantasma">abrir</button></a>'
         f'  </span></div>')
 
@@ -530,28 +568,42 @@ async def acao(request: Request, jarvis_admin: str | None = Cookie(default=None)
     elif qual == "desbloquear":
         assinaturas.desbloquear(usuario_id)
     elif qual == "mais_aparelho":
-        assinaturas.definir_aparelhos_pagos(usuario_id, estado["aparelhos_pagos"] + 1)
+        # o teto do plano vale aqui também: nem o painel libera além dele
+        if not _pode_mais_um(estado):
+            nome = planos.nome(estado["plano"])
+            erro = (f"o plano {nome} já é sem limite de equipamentos" if estado["ilimitado"]
+                    else f"o plano {nome} libera no máximo "
+                         f"{planos.equipamentos_txt(estado['limite'])} — troque o plano "
+                         "para liberar mais")
+            return JSONResponse({"ok": False, "erro": erro}, 400)
+        assinaturas.definir_aparelhos_pagos(
+            usuario_id, estado["limite"] + 1 - config.aparelhos_inclusos)
     elif qual == "menos_aparelho":
-        if estado["aparelhos_pagos"] <= 0:
-            return JSONResponse({"ok": False, "erro": "já está no mínimo de equipamentos"}, 400)
-        assinaturas.definir_aparelhos_pagos(usuario_id, estado["aparelhos_pagos"] - 1)
+        if estado["ilimitado"]:
+            return JSONResponse({"ok": False, "erro": "o Supreme é sem limite — troque o "
+                                 "plano para limitar os equipamentos"}, 400)
+        if estado["limite"] <= 1:
+            return JSONResponse({"ok": False, "erro": "o mínimo é 1 equipamento"}, 400)
+        assinaturas.definir_aparelhos_pagos(
+            usuario_id, estado["limite"] - 1 - config.aparelhos_inclusos)
     elif qual == "plano":
         novo = str(dados.get("plano") or "")
         if not planos.existe(novo):
-            return JSONResponse({"ok": False, "erro": "plano desconhecido"}, 400)
-        assinaturas.definir_plano(usuario_id, novo)
-        mensagens[qual] = f"plano trocado para {planos.nome(novo)}"
-        recarregar = True
-    elif qual == "equipamentos":
-        try:
-            quantidade = int(dados.get("quantidade") or 0)
-        except (TypeError, ValueError):
-            quantidade = 0
-        if quantidade < config.aparelhos_inclusos:
-            return JSONResponse({"ok": False, "erro":
-                                 f"o mínimo é {config.aparelhos_inclusos}"}, 400)
-        assinaturas.definir_aparelhos_pagos(usuario_id, quantidade - config.aparelhos_inclusos)
-        mensagens[qual] = f"{quantidade} equipamento{'s' if quantidade != 1 else ''} liberado{'s' if quantidade != 1 else ''}"
+            return JSONResponse({"ok": False, "erro": "escolha um dos planos"}, 400)
+        teto = planos.max_equipamentos(novo)
+        quantidade = None
+        if teto is not None:
+            try:
+                quantidade = int(dados.get("quantidade") or 0)
+            except (TypeError, ValueError):
+                quantidade = 0
+            if quantidade < 1 or quantidade > teto:
+                faixa = "1 equipamento" if teto == 1 else f"de 1 a {teto} equipamentos"
+                return JSONResponse({"ok": False, "erro":
+                                     f"o plano {planos.nome(novo)} libera {faixa}"}, 400)
+        final = assinaturas.definir_plano(usuario_id, novo, quantidade)
+        mensagens[qual] = (f"{planos.nome(novo)} com "
+                           f"{planos.equipamentos_txt(final['limite'])}")
         recarregar = True
     elif qual == "remover_aparelho":
         contas.remover_aparelho(usuario_id, int(dados.get("aparelho") or 0))
@@ -579,24 +631,39 @@ def usuario(usuario_id: int, jarvis_admin: str | None = Cookie(default=None)):
     estado = contas.estado_da_assinatura(usuario_id)
     aparelhos = contas.aparelhos_do_usuario(usuario_id)
     criada = banco.para_data(alvo["criado_em"])
+    fora = contas.fora_do_limite(usuario_id, estado["limite"])
 
     def linha_aparelho(a: dict) -> str:
         quando = escape(str(a["ultimo_acesso"])[:16].replace("T", " "))
         botao = (f'<button class="perigo" '
                  f'onclick="removerAparelho({usuario_id},{int(a["id"])},this)">remover</button>')
+        acesso = ('<span class="tempo acabou">fora do limite — sem acesso</span>'
+                  if a["id"] in fora else '<span style="color:var(--ok)">liberado</span>')
         return (f'<tr><td>{escape(a["apelido"] or "—")}</td>'
                 f'<td>{escape(a["plataforma"] or "—")}</td><td>{quando}</td>'
-                f'<td>{botao}</td></tr>')
+                f'<td>{acesso}</td><td>{botao}</td></tr>')
 
     tempo, classe = _tempo_restante(estado, bool(alvo["bloqueado"]))
     plano_atual = estado["plano"]
     opcoes = "".join(
-        f'<option value="{k}"{" selected" if k == plano_atual else ""}>'
-        f'{escape(v["nome"])} — {planos.moeda(v["preco"])}</option>'
+        f'<option value="{k}" data-teto="{v["max_equipamentos"] or "sem"}"'
+        f'{" selected" if k == plano_atual else ""}>'
+        f'{escape(v["nome"])} — {planos.moeda(v["preco"])} · '
+        f'{escape(planos.equipamentos_txt(v["max_equipamentos"]))}'
+        f'{" no máximo" if (v["max_equipamentos"] or 1) > 1 else ""}</option>'
         for k, v in planos.PLANOS.items())
     if not planos.existe(plano_atual):
         opcoes = f'<option value="" selected>{escape(planos.nome(plano_atual))}</option>' + opcoes
     mensal = planos.preco(plano_atual, estado["aparelhos_pagos"])
+    teto_atual = planos.max_equipamentos(plano_atual)
+    if estado["ilimitado"]:
+        campo_equip = (f'<input id="equip-{usuario_id}" type="number" min="1" '
+                       f'placeholder="sem limite" disabled>')
+    else:
+        campo_equip = (f'<input id="equip-{usuario_id}" type="number" min="1" '
+                       f'max="{teto_atual or 500}" value="{estado["limite"]}">')
+    em_uso = (f'{len(aparelhos)} <span class="tempo acabou" style="font-size:12px">'
+              f'({len(fora)} fora do limite)</span>' if fora else str(len(aparelhos)))
 
     corpo = f"""
       <h1>{escape(alvo['email'])}</h1>
@@ -612,35 +679,35 @@ def usuario(usuario_id: int, jarvis_admin: str | None = Cookie(default=None)):
           <div><small>plano</small><b>{escape(planos.nome(plano_atual))}</b></div>
           <div><small>cobre</small><b>{escape(planos.pessoas_txt(plano_atual))}</b></div>
           <div><small>mensalidade</small><b>{planos.moeda(mensal)}</b></div>
-          <div><small>equipamentos liberados</small><b>{estado['limite']}</b></div>
-          <div><small>equipamentos em uso</small><b>{len(aparelhos)}</b></div>
+          <div><small>equipamentos liberados</small><b>{'sem limite' if estado['ilimitado'] else estado['limite']}</b></div>
+          <div><small>equipamentos em uso</small><b>{em_uso}</b></div>
           <div><small>tempo restante</small><b class="tempo {classe}">{tempo}</b></div>
         </div>
         <div class="ajuste">
-          <select id="plano-{usuario_id}">{opcoes}</select>
-          <button class="fantasma" onclick="trocarPlano({usuario_id},this)">trocar plano</button>
-          <input id="equip-{usuario_id}" type="number" min="{config.aparelhos_inclusos}" max="500"
-                 value="{estado['limite']}">
-          <button class="fantasma" onclick="definirEquipamentos({usuario_id},this)">definir equipamentos</button>
+          <select id="plano-{usuario_id}" onchange="ajustarTeto({usuario_id})">{opcoes}</select>
+          {campo_equip}
+          <button class="fantasma" onclick="salvarPlano({usuario_id},this)">salvar plano e equipamentos</button>
         </div>
+        <p style="color:var(--tenue);font-size:12.5px;margin:10px 0 0">
+          O limite vale à risca: equipamento além dele não abre o JARVIS. Valem os que
+          entraram primeiro; para trocar qual fica, remova um lá embaixo.
+        </p>
       </div>
       <div class="painel">
         <h2>Assinatura</h2>
         <div class="acoes">
           <button onclick="acao({usuario_id},'ativar30',this)">+ 30 dias</button>
           <button onclick="acao({usuario_id},'ativar365',this)">+ 1 ano</button>
-          <button class="fantasma" onclick="acao({usuario_id},'mais_aparelho',this)">+ equipamento</button>
-          <button class="fantasma" onclick="acao({usuario_id},'menos_aparelho',this)">− equipamento</button>
           <button class="perigo" onclick="acao({usuario_id},'vencer',this)">vencer agora</button>
           <button class="perigo" onclick="acao({usuario_id},'{'desbloquear' if alvo['bloqueado'] else 'bloquear'}',this)">
             {'desbloquear conta' if alvo['bloqueado'] else 'bloquear conta'}</button>
         </div>
       </div>
       <div class="painel">
-        <h2>Equipamentos ligados ({len(aparelhos)} de {estado['limite']})</h2>
-        <table><tr><th>apelido</th><th>plataforma</th><th>último acesso</th><th></th></tr>
+        <h2>Equipamentos ligados ({len(aparelhos)} de {'∞' if estado['ilimitado'] else estado['limite']})</h2>
+        <table><tr><th>apelido</th><th>plataforma</th><th>último acesso</th><th>acesso</th><th></th></tr>
         {''.join(linha_aparelho(a) for a in aparelhos)
-         or '<tr><td colspan="4" class="vazio">nenhum equipamento ligado</td></tr>'}
+         or '<tr><td colspan="5" class="vazio">nenhum equipamento ligado</td></tr>'}
         </table>
       </div>"""
     return _pagina("Conta", corpo, admin["email"], "contas")
@@ -657,8 +724,8 @@ def _cartao_pedido(pedido_id: int) -> str:
     equipamentos = planos.equipamentos_do_pedido(p["plano"], p["aparelhos"])
     plano = (f'<b style="font-size:13.5px;color:var(--acento)">{escape(planos.nome(p["plano"]))}</b>'
              f' ({escape(planos.pessoas_txt(p["plano"]))})')
-    extras = (f' · <b style="font-size:13.5px;color:var(--texto)">{equipamentos} equipamento'
-              f'{"s" if equipamentos != 1 else ""}</b>')
+    extras = (f' · <b style="font-size:13.5px;color:var(--texto)">'
+              f'{escape(planos.equipamentos_txt(equipamentos))}</b>')
     valor_txt = planos.moeda(planos.preco(p["plano"], p["aparelhos"]))
 
     teste = p["plano"] == planos.TESTE
@@ -740,7 +807,8 @@ async def acao_pedido(request: Request, jarvis_admin: str | None = Cookie(defaul
         if qual == "atender":
             resultado = pedidos.atender(pedido_id)
             msg = (f"{resultado['email']} liberada por {resultado['dias']} dias — "
-                   f"{planos.nome(resultado['plano'])}, {resultado['equipamentos']} equipamento(s)")
+                   f"{planos.nome(resultado['plano'])}, "
+                   f"{planos.equipamentos_txt(resultado['equipamentos'])}")
         elif qual == "recusar":
             pedidos.marcar(pedido_id, "recusado")
             msg = "pedido arquivado"
@@ -811,7 +879,8 @@ def lista_acessos(jarvis_admin: str | None = Cookie(default=None)):
         corpo.append(
             f'<div class="conta-acesso{" atencao" if c["ips_demais"] else ""}">'
             f'  <div class="cabeca"><b>{escape(c["email"])}</b>{selo}{alerta}</div>'
-            f'  <div class="contagem"><b>{len(c["aparelhos"])}</b> de <b>{c["limite"]}</b> '
+            f'  <div class="contagem"><b>{len(c["aparelhos"])}</b> de '
+            f'<b>{"∞" if c["limite"] >= planos.SEM_LIMITE else c["limite"]}</b> '
             f'aparelhos liberados · <b>{c["quantos_ips"]}</b> IP(s) diferentes em 30 dias</div>'
             f'  {"".join(blocos)}</div>')
 
